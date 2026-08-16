@@ -14,30 +14,41 @@ val fixQuickResponseBlankLinesPatch = resourcePatch(
         val selectionJs = get("assets/selection.js")
         val source = selectionJs.readText()
 
-        val original = """
-  // Delete current selection
-  range.deleteContents();
+        // If the file already contains our implementation, do nothing.
+        if (source.contains("boxerQuickResponseNewlineFix")) {
+            return@execute
+        }
 
-  // Insert the text
-  const textNode = document.createTextNode(text);
-  range.insertNode(textNode);
-
-  // Move caret to end of inserted text
-  range.setStartAfter(textNode);
-  range.collapse(true);
-  selection.removeAllRanges();
-  selection.addRange(range);
-""".trimIndent()
+        // Replace the complete insertText() implementation rather than matching an
+        // exact whitespace/comment block. Boxer has shipped the same function with
+        // small formatting differences, which made the first patch unnecessarily brittle.
+        // We anchor the match to the following insertHtml() function so we cannot
+        // accidentally replace an unrelated block.
+        val insertTextFunction = Regex(
+            pattern = """(?s)function\s+insertText\s*\(\s*text\s*\)\s*\{.*?\n\}\s*\n\s*function\s+insertHtml\s*\("""
+        )
 
         val replacement = """
-  // Delete current selection.
+function insertText(text) {
+  const boxerQuickResponseNewlineFix = true;
+  const selection = window.getSelection();
+  let range;
+
+  if (!selection.rangeCount) {
+    const el = getRootElement();
+    if (!el) return;
+    range = document.createRange();
+    range.setStart(el, 0);
+  } else {
+    range = selection.getRangeAt(0);
+  }
+
   range.deleteContents();
 
-  // Boxer renders the composer with white-space: normal, so newline
-  // characters inside one text node collapse. Convert newlines to real
-  // <br> nodes so blank lines in Quick Responses are preserved.
-  const normalizedText = String(text).replace(/\\r\\n?/g, "\\n");
-  const lines = normalizedText.split("\\n");
+  // The composer uses white-space: normal. Newline characters in one text node
+  // therefore collapse. Insert real BR nodes so \n\n remains an empty line.
+  const normalizedText = String(text).replace(/\r\n?/g, "\n");
+  const lines = normalizedText.split("\n");
   const fragment = document.createDocumentFragment();
   let lastNode = null;
 
@@ -61,25 +72,24 @@ val fixQuickResponseBlankLinesPatch = resourcePatch(
   }
 
   range.insertNode(fragment);
-
-  // Move caret to end of inserted content.
   range.setStartAfter(lastNode);
   range.collapse(true);
   selection.removeAllRanges();
   selection.addRange(range);
+}
+
+function insertHtml(
 """.trimIndent()
 
-        if (!source.contains(original)) {
-            if (source.contains("const normalizedText = String(text).replace")) {
-                // Already patched; leave it alone.
-                return@execute
-            }
+        val matches = insertTextFunction.findAll(source).toList()
+        if (matches.size != 1) {
             throw PatchException(
-                "Boxer assets/selection.js did not contain the expected insertText block. " +
-                    "This Boxer version may need an updated patch."
+                "Could not safely identify exactly one Boxer insertText() function " +
+                    "next to insertHtml(); found ${matches.size}. The Boxer version needs review."
             )
         }
 
-        selectionJs.writeText(source.replace(original, replacement))
+        val patched = insertTextFunction.replaceFirst(source, replacement)
+        selectionJs.writeText(patched)
     }
 }
